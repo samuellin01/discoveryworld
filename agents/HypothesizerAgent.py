@@ -21,7 +21,7 @@ import anthropic
 #LIMITED_ACTIONS = True     # Disables a few actions
 LIMITED_ACTIONS = False
 
-CLAUDE_MODEL_TO_USE = "us.anthropic.claude-sonnet-4-20250514"
+CLAUDE_MODEL_TO_USE = "us.anthropic.claude-opus-4-6-v1"
 
 # Keep track of tokens sent/received
 TOTAL_TOKENS_SENT = 0
@@ -35,15 +35,15 @@ COST_PER_TOKEN_SENT = 3.0 / 1000000.0
 COST_PER_TOKEN_RECEIVED = 15.0 / 1000000.0
 
 modelCostsPerToken = {
-    "us.anthropic.claude-sonnet-4-20250514": {
+    "us.anthropic.claude-sonnet-4-20250514-v1:0": {
         "send": 3.0 / 1000000.0,
         "receive": 15.0 / 1000000.0
     },
-    "us.anthropic.claude-sonnet-4-6-20250515": {
-        "send": 3.0 / 1000000.0,
-        "receive": 15.0 / 1000000.0
+    "us.anthropic.claude-opus-4-20250514-v1:0": {
+        "send": 15.0 / 1000000.0,
+        "receive": 75.0 / 1000000.0
     },
-    "us.anthropic.claude-opus-4-20250514": {
+    "us.anthropic.claude-opus-4-6-v1": {
         "send": 15.0 / 1000000.0,
         "receive": 75.0 / 1000000.0
     },
