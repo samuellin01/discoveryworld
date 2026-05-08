@@ -5,8 +5,6 @@ import os
 from discoveryworld.DiscoveryWorldAPI import DiscoveryWorldAPI
 from discoveryworld.ScenarioMaker import ScenarioMaker, SCENARIOS, SCENARIO_NAMES, SCENARIO_INFOS, SCENARIO_DIFFICULTY_OPTIONS, getInternalScenarioName
 
-import openai
-
 import traceback
 
 import json
@@ -15,20 +13,15 @@ import random
 import copy
 import signal
 import sys
+import base64
 
-# Tiktoken
-import tiktoken
-encoding = tiktoken.get_encoding("cl100k_base")
+import anthropic
 
 
 #LIMITED_ACTIONS = True     # Disables a few actions
 LIMITED_ACTIONS = False
 
-#OPENAI_MODEL_TO_USE = "gpt-4-vision-preview"
-#OPENAI_MODEL_TO_USE = "gpt-4-turbo-2024-04-09"
-#OPENAI_MODEL_TO_USE = "gpt-3.5-turbo-0125"
-# OPENAI_MODEL_TO_USE = "gpt-4o-2024-05-13"
-OPENAI_MODEL_TO_USE = "gpt-4o"
+CLAUDE_MODEL_TO_USE = "us.anthropic.claude-sonnet-4-20250514"
 
 # Keep track of tokens sent/received
 TOTAL_TOKENS_SENT = 0
@@ -38,30 +31,22 @@ TOTAL_TOKENS_RECEIVED = 0
 TOTAL_COST_SENT = 0
 TOTAL_COST_RECEIVED = 0
 
-COST_PER_TOKEN_SENT = 10.0 / 1000000.0     # $10 per 1 million tokens
-COST_PER_TOKEN_RECEIVED = 30.0 / 1000000.0     # $10 per 1 million tokens
+COST_PER_TOKEN_SENT = 3.0 / 1000000.0
+COST_PER_TOKEN_RECEIVED = 15.0 / 1000000.0
 
 modelCostsPerToken = {
-    "gpt-4-vision-preview": {
-        "send": 10.0 / 1000000.0,
-        "receive": 30.0 / 1000000.0
-    },
-    "gpt-4-turbo-2024-04-09": {
-        "send": 10.0 / 1000000.0,
-        "receive": 30.0 / 1000000.0
-    },
-    "gpt-3.5-turbo-0125": {
-        "send": 0.5 / 1000000.0,
-        "receive": 1.5 / 1000000.0
-    },
-    "gpt-4o-2024-05-13": {
-        "send": 5.0 / 1000000.0,
+    "us.anthropic.claude-sonnet-4-20250514": {
+        "send": 3.0 / 1000000.0,
         "receive": 15.0 / 1000000.0
     },
-    "gpt-4o": {
-        "send": 5.0 / 1000000.0,
+    "us.anthropic.claude-sonnet-4-6-20250515": {
+        "send": 3.0 / 1000000.0,
         "receive": 15.0 / 1000000.0
-    }
+    },
+    "us.anthropic.claude-opus-4-20250514": {
+        "send": 15.0 / 1000000.0,
+        "receive": 75.0 / 1000000.0
+    },
 }
 
 # MAXIMUM COST OF A RUN (in dollars)
@@ -135,135 +120,94 @@ def mkShortInteractableObjectList(observation):
 #   OpenAI Helper Functions
 #
 
-# promptImages should be a list of base64-encoded images
-# NOTE: JSON response not available for GPT-4 Vision Preview
-OPENAI_REQUESTS_ERRORS = 0
-OPENAI_REQUESTS_NOERRORS = 0
-def OpenAIGetCompletion(client, promptStr:str, promptImages:list, model=OPENAI_MODEL_TO_USE, prevImage=None, temperature=0.0, maxTokens=800, jsonResponse:bool=False):
-    global OPENAI_REQUESTS_ERRORS
-    global OPENAI_REQUESTS_NOERRORS
+REQUESTS_ERRORS = 0
+REQUESTS_NOERRORS = 0
 
-    while (OPENAI_REQUESTS_ERRORS < 5):
+def _convert_data_uri_to_bedrock_image(data_uri):
+    """Convert a data:image/...;base64,... URI to Anthropic image content block."""
+    header, b64data = data_uri.split(",", 1)
+    media_type = header.split(":")[1].split(";")[0]
+    return {
+        "type": "image",
+        "source": {
+            "type": "base64",
+            "media_type": media_type,
+            "data": b64data,
+        },
+    }
+
+def OpenAIGetCompletion(client, promptStr:str, promptImages:list, model=CLAUDE_MODEL_TO_USE, prevImage=None, temperature=0.0, maxTokens=800, jsonResponse:bool=False):
+    global REQUESTS_ERRORS
+    global REQUESTS_NOERRORS
+
+    while (REQUESTS_ERRORS < 5):
         try:
-            result = OpenAIGetCompletionHelper(client, promptStr, promptImages, model, prevImage, temperature, maxTokens, jsonResponse)
-            OPENAI_REQUESTS_NOERRORS += 1
-            # If we get 100 requests without errors, reset the error counter
-            if (OPENAI_REQUESTS_NOERRORS > 100):
-                OPENAI_REQUESTS_ERRORS = 0
+            result = ClaudeGetCompletionHelper(client, promptStr, promptImages, model, prevImage, temperature, maxTokens, jsonResponse)
+            REQUESTS_NOERRORS += 1
+            if (REQUESTS_NOERRORS > 100):
+                REQUESTS_ERRORS = 0
             return result
 
-        # Keyboard interrupt
         except KeyboardInterrupt:
             print("Keyboard interrupt detected.  Exiting.")
             exit(1)
 
-        # Kill signal
         except SystemExit:
             print("System exit detected.  Exiting.")
             exit(1)
 
         except Exception as e:
-            print("ERROR: OpenAI request failed.")
+            print("ERROR: Claude request failed.")
             print("ERROR: " + str(e))
-            OPENAI_REQUESTS_ERRORS += 1
-            # Wait a bit before trying again
+            traceback.print_exc()
+            REQUESTS_ERRORS += 1
             print("Waiting 5 seconds before trying again.")
             time.sleep(5)
 
-    # If we get here, we've exceeded the number of errors
-    print("ERROR: Exceeded the number of OPEN_AI errors allowed (5 errors within 100 requests).  Exiting.")
+    print("ERROR: Exceeded the number of errors allowed (5 errors within 100 requests).  Exiting.")
     exit(1)
 
 
-
-def OpenAIGetCompletionHelper(client, promptStr:str, promptImages:list, model=OPENAI_MODEL_TO_USE, prevImage=None, temperature=0.0, maxTokens=800, jsonResponse:bool=False):
+def ClaudeGetCompletionHelper(client, promptStr:str, promptImages:list, model=CLAUDE_MODEL_TO_USE, prevImage=None, temperature=0.0, maxTokens=800, jsonResponse:bool=False):
     content = []
 
-    # If previous image was popualted, include it
     if (prevImage != None):
-        # Add a text message saying it was the previous image.
         content.append({"type": "text", "text": "IMAGE FROM PREVIOUS STEP:"})
-        packedImage = {
-            "type": "image_url",
-            "image_url": {
-                "url": prevImage,
-                #"detail": "low",
-            },
-        }
-        content.append(packedImage)
+        content.append(_convert_data_uri_to_bedrock_image(prevImage))
 
-    # Add main prompt
     content.append({"type": "text", "text": promptStr})
 
-    # If there are images, include them.
     if (promptImages != None) and (len(promptImages) > 0):
         for image in promptImages:
-            packedImage = {
-                "type": "image_url",
-                "image_url": {
-                    "url": image,
-                    #"detail": "low",
-                },
-            }
-            content.append(packedImage)
+            content.append(_convert_data_uri_to_bedrock_image(image))
 
+    if jsonResponse:
+        content.append({"type": "text", "text": "\n\nIMPORTANT: Respond with valid JSON only, no other text."})
 
-    # Create the message prompt, initially including only the prompt string
-    messages=[
-        {
-            "role": "user",
-            "content": content,
-        }
-    ]
+    response = client.messages.create(
+        model=model,
+        max_tokens=maxTokens,
+        temperature=temperature,
+        messages=[{"role": "user", "content": content}],
+    )
 
-    response = {}
-
-    # Get the response
-    if (jsonResponse == False):
-        response = client.chat.completions.create(
-            model=model,
-            messages=messages,
-            max_tokens=maxTokens,
-            temperature=temperature,
-        )
-    else:
-        response = client.chat.completions.create(
-            model=model,
-            messages=messages,
-            max_tokens=maxTokens,
-            temperature=temperature,
-            response_format={ "type": "json_object" },
-        )
-
-    # # Return the response
-    # print("RESPONSE:")
-    # print(response)
-    # print("")
-    # print("RESPONSE CONTENT:")
-    # print(response.choices[0].message.content)
-
-    # Try to keep track of tokens sent/received
+    # Track tokens
     try:
         global TOTAL_TOKENS_SENT
         global TOTAL_TOKENS_RECEIVED
-        TOTAL_TOKENS_SENT += response.usage.prompt_tokens
-        TOTAL_TOKENS_RECEIVED += response.usage.completion_tokens
+        TOTAL_TOKENS_SENT += response.usage.input_tokens
+        TOTAL_TOKENS_RECEIVED += response.usage.output_tokens
     except:
         print("ERROR: Could not extract tokens from response.")
 
     print("TOTAL TOKENS SENT: " + str(TOTAL_TOKENS_SENT))
     print("TOTAL TOKENS RECEIVED: " + str(TOTAL_TOKENS_RECEIVED))
-    # Calculate approximate costs
     try:
-        # First, lookup the cost per token for the model
         if (model in modelCostsPerToken):
             global COST_PER_TOKEN_SENT
             global COST_PER_TOKEN_RECEIVED
             COST_PER_TOKEN_SENT = modelCostsPerToken[model]["send"]
             COST_PER_TOKEN_RECEIVED = modelCostsPerToken[model]["receive"]
-        else:
-            print("ERROR: Could not find cost per token for model: " + model)
-
 
         totalCostSent = round(TOTAL_TOKENS_SENT * COST_PER_TOKEN_SENT, 2)
         totalCostReceived = round(TOTAL_TOKENS_RECEIVED * COST_PER_TOKEN_RECEIVED, 2)
@@ -438,12 +382,12 @@ def GPT4HypothesizerOneStep(api, client, lastActionHistory, lastObservation, cur
         promptImages = None
         lastImage = None
 
-    response = OpenAIGetCompletion(client, promptStr=promptStr, promptImages=promptImages, model=OPENAI_MODEL_TO_USE, prevImage=lastImage, temperature=0.1, maxTokens=800)
+    response = OpenAIGetCompletion(client, promptStr=promptStr, promptImages=promptImages, model=CLAUDE_MODEL_TO_USE, prevImage=lastImage, temperature=0.1, maxTokens=800)
     print(response)
 
     # Extract the JSON from the response
     print("EXCTRACTING MESSAGE")
-    responseStr = response.choices[0].message.content
+    responseStr = response.content[0].text
     print("SUCCESS1")
     responseJSON = extractJSONfromGPT4Response(responseStr)
     print("SUCCESS2")
@@ -584,13 +528,13 @@ def GPT4HypothesizerOneStep(api, client, lastActionHistory, lastObservation, cur
     knowledgePromptStr += "It is also critically important that your output is valid JSON.  Please be careful in generating valid JSON.  You should generate a dictionary with a single top-level key (`scientific_knowledge`), which is an array of new measurements and/or hypotheses to add.\n"
     knowledgePromptStr += "You can write prose before writing the JSON.  Only the last codeblock (```) in your response will be parsed for the JSON.\n"
 
-    #response = OpenAIGetCompletion(client, promptStr=promptStr, promptImages=promptImages, model=OPENAI_MODEL_TO_USE, prevImage=lastImage, temperature=0.1, maxTokens=800)
-    response = OpenAIGetCompletion(client, promptStr=knowledgePromptStr, promptImages=[], model=OPENAI_MODEL_TO_USE, prevImage=None, temperature=0.1, maxTokens=3000)
+    #response = OpenAIGetCompletion(client, promptStr=promptStr, promptImages=promptImages, model=CLAUDE_MODEL_TO_USE, prevImage=lastImage, temperature=0.1, maxTokens=800)
+    response = OpenAIGetCompletion(client, promptStr=knowledgePromptStr, promptImages=[], model=CLAUDE_MODEL_TO_USE, prevImage=None, temperature=0.1, maxTokens=3000)
     print(response)
 
     # Extract the JSON from the response
     print("EXCTRACTING MESSAGE")
-    responseStrKnowledge = response.choices[0].message.content
+    responseStrKnowledge = response.content[0].text
     print("SUCCESS1")
     responseJSONKnowledge = extractJSONfromGPT4Response(responseStrKnowledge)
     print("SUCCESS2")
@@ -632,10 +576,9 @@ def GPT4HypothesizerOneStep(api, client, lastActionHistory, lastObservation, cur
     #return nextAction, observation, promptStr, responseStr, currentScientificKnowledge
     return packedOut
 
-# Count the number of tokens (as OpenAI would count them)
 def countTokens(strIn):
-    num_tokens = len(encoding.encode(strIn))
-    return num_tokens
+    # Rough estimate: ~4 chars per token
+    return len(strIn) // 4
 
 # This function runs periodically (i.e. every 10 in-game steps), and asks the agent to consolidate their knowledge
 # so that it's more compact, and doesn't take up as much space in the prompt.
@@ -697,13 +640,13 @@ def consolidateKnowledgeStep(client, scientificKnowledge, stepIdx):
     print("Consolidation Step:")
     print("\tEntries before consoloation: " + str(numEntries))
     print("\tTokens before consoloation: " + str(numTokensKB))
-    response = OpenAIGetCompletion(client, promptStr=promptStr, promptImages=[], model=OPENAI_MODEL_TO_USE, prevImage=None, temperature=0.1, maxTokens=3000)
+    response = OpenAIGetCompletion(client, promptStr=promptStr, promptImages=[], model=CLAUDE_MODEL_TO_USE, prevImage=None, temperature=0.1, maxTokens=3000)
     print(response)
 
 
     # Extract the JSON from the response
     print("EXTRACTING MESSAGE")
-    responseStrKnowledge = response.choices[0].message.content
+    responseStrKnowledge = response.content[0].text
     print("SUCCESS1")
     responseJSONKnowledge = extractJSONfromGPT4Response(responseStrKnowledge)
     print("SUCCESS2")
@@ -784,14 +727,8 @@ def mkInitialHypotheses():
 
 # This is the main entry point for the Hypothesizer Agent
 def GPT4VHypothesizerAgent(api, numSteps:int = 10, logFileSuffix:str = "", includeImages=True):
-    # Get the OpenAI key (stored in a file called "openai_key.txt")
-    key = None
-    if os.path.exists("openai_key.txt"):
-        with open("openai_key.txt", "r") as file:
-            key = file.read().strip()
-
-    # Create the OpenAI client
-    client = openai.AzureOpenAI(api_key=key) if openai.api_type == "azure" else openai.OpenAI(api_key=key)
+    # Create the Anthropic Bedrock client (uses AWS credentials from environment)
+    client = anthropic.AnthropicBedrock(aws_region="us-east-1")
 
     # Initial Memory
     lastAction = {
@@ -893,7 +830,7 @@ def GPT4VHypothesizerAgent(api, numSteps:int = 10, logFileSuffix:str = "", inclu
                 costLimitExceeded = True
 
             costAnalysis = {
-                "model": OPENAI_MODEL_TO_USE,
+                "model": CLAUDE_MODEL_TO_USE,
                 "total_tokens_sent": TOTAL_TOKENS_SENT,
                 "total_tokens_received": TOTAL_TOKENS_RECEIVED,
                 "cost_per_million_tokens_sent": costPerMillionTokensSent,
@@ -982,7 +919,7 @@ def runHypothesizerAgent(scenarioName:str, difficultyStr:str, seed:int=0, numSte
 
     startTime = time.time()
     # Hypothesizer
-    logFileSuffix = "." + scenarioName + "-" + difficultyStr + "-s" + str(seed) + "-images" + str(includeImages) + "-model" + OPENAI_MODEL_TO_USE + "-thread" + str(api.THREAD_ID)
+    logFileSuffix = "." + scenarioName + "-" + difficultyStr + "-s" + str(seed) + "-images" + str(includeImages) + "-model" + CLAUDE_MODEL_TO_USE + "-thread" + str(api.THREAD_ID)
     # Add date and time stamp
     import datetime
     logFileSuffix += "." + datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
@@ -1074,8 +1011,7 @@ if __name__ == "__main__":
     parser.add_argument('--video', action='store_true', help='Export video of agent actions')
     parser.add_argument('--threadId', type=int, default=None)
     parser.add_argument('--maxCostDollars', type=float, default=0.0, help='Maximum cost in dollars to run the agent (default: 0.0).  Not guaranteed to be exact.  Will attempt to stop the agent when the cost exceeds this amount.')
-    OPENAI_MODEL_TO_USE = "gpt-4o-2024-05-13"
-    parser.add_argument("--model", default=OPENAI_MODEL_TO_USE, help="OpenAI model to use (default: " + OPENAI_MODEL_TO_USE + ")")
+    parser.add_argument("--model", default=CLAUDE_MODEL_TO_USE, help="Claude model to use (default: " + CLAUDE_MODEL_TO_USE + ")")
 
     # Disable images
     parser.add_argument('--noimages', action='store_true', help='Do not include images in the prompt')
@@ -1105,8 +1041,8 @@ if __name__ == "__main__":
         includeImages = False
 
     # Model to use
-    OPENAI_MODEL_TO_USE = args.model
-    print("Using model: " + OPENAI_MODEL_TO_USE)
+    CLAUDE_MODEL_TO_USE = args.model
+    print("Using model: " + CLAUDE_MODEL_TO_USE)
 
     # Report thread ID to user
     print("Using Thread ID: " + str(args.threadId))
