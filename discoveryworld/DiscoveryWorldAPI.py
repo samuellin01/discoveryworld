@@ -380,8 +380,9 @@ class DiscoveryWorldAPI:
 
     # Create a headless window -- i.e. a surface that can be used to render to, but no real window is created
     def createHeadlessWindow(self, windowMode="small"):
-        # Initialize pygame in headless mode (i.e. no real window is created)
-        os.environ["SDL_VIDEODRIVER"] = "dummy"
+        # Use real display if DISPLAY is set (e.g. Xvfb), otherwise headless
+        if "DISPLAY" not in os.environ or os.environ.get("DISCOVERYWORLD_HEADLESS"):
+            os.environ["SDL_VIDEODRIVER"] = "dummy"
 
         # Game parameters
         gameParams = {
