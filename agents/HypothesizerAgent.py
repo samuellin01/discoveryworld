@@ -382,7 +382,7 @@ def GPT4HypothesizerOneStep(api, client, lastActionHistory, lastObservation, cur
         promptImages = None
         lastImage = None
 
-    response = OpenAIGetCompletion(client, promptStr=promptStr, promptImages=promptImages, model=CLAUDE_MODEL_TO_USE, prevImage=lastImage, temperature=0.1, maxTokens=800)
+    response = OpenAIGetCompletion(client, promptStr=promptStr, promptImages=promptImages, model=CLAUDE_MODEL_TO_USE, prevImage=lastImage, temperature=0.1, maxTokens=2000)
     print(response)
 
     # Extract the JSON from the response
@@ -794,6 +794,21 @@ def GPT4VHypothesizerAgent(api, numSteps:int = 10, logFileSuffix:str = "", inclu
                 "oracle_scorecard": api.getTaskScorecard()
             }
             observationHistory.append(packed)
+
+            # Write readable progress log
+            try:
+                progressLine = f"Step {i}: ACTION={lastAction.get('action','?')} | {lastAction.get('explanation','')[:120]}\n"
+                hypotheses = lastAction.get('running_hypotheses', [])
+                scorecard = api.getTaskScorecard()
+                score = scorecard[0]['scoreNormalized'] if scorecard else 0
+                progressLine += f"  Score: {score:.0%} | Hypotheses: {len(hypotheses)} | Cost: ${TOTAL_COST_SENT + TOTAL_COST_RECEIVED:.2f}\n"
+                if hypotheses:
+                    progressLine += f"  Top hypothesis: {hypotheses[0][:150]}\n"
+                progressLine += "---\n"
+                with open("progress_log.txt", "a") as pf:
+                    pf.write(progressLine)
+            except:
+                pass
 
             # Every 10 steps, consolidate the knowledge
             if (i % 10 == 0) and (i > 0):
