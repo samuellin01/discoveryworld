@@ -797,13 +797,15 @@ def GPT4VHypothesizerAgent(api, numSteps:int = 10, logFileSuffix:str = "", inclu
 
             # Write readable progress log
             try:
-                progressLine = f"Step {i}: ACTION={lastAction.get('action','?')} | {lastAction.get('explanation','')[:120]}\n"
+                progressLine = f"Step {i}: ACTION={lastAction.get('action','?')}\n"
+                progressLine += f"  Explanation: {lastAction.get('explanation','')}\n"
                 hypotheses = lastAction.get('running_hypotheses', [])
                 scorecard = api.getTaskScorecard()
                 score = scorecard[0]['scoreNormalized'] if scorecard else 0
                 progressLine += f"  Score: {score:.0%} | Hypotheses: {len(hypotheses)} | Cost: ${TOTAL_COST_SENT + TOTAL_COST_RECEIVED:.2f}\n"
                 if hypotheses:
-                    progressLine += f"  Top hypothesis: {hypotheses[0][:150]}\n"
+                    for hi, h in enumerate(hypotheses):
+                        progressLine += f"  Hypothesis {hi}: {h}\n"
                 progressLine += "---\n"
                 with open("progress_log.txt", "a") as pf:
                     pf.write(progressLine)
